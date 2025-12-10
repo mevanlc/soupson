@@ -3,13 +3,47 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Iterable, Collection
 
 from bs4 import BeautifulSoup, UnicodeDammit
+
+# Optional lxml import for XPath support
+try:
+    from lxml import etree as lxml_etree
+    from lxml.html import document_fromstring as lxml_html_fromstring
+    from lxml.html import tostring as lxml_html_tostring
+
+    LXML_AVAILABLE = True
+except ImportError:
+    lxml_etree = None  # type: ignore[assignment]
+    lxml_html_fromstring = None  # type: ignore[assignment]
+    lxml_html_tostring = None  # type: ignore[assignment]
+    LXML_AVAILABLE = False
 from bs4.element import Tag, NavigableString
 from bs4.formatter import Formatter
+
+
+class SelectorType(Enum):
+    """Type of selector expression."""
+
+    CSS = "css"
+    XPATH = "xpath"
+
+
+def _parse_selector(expr: str) -> tuple[SelectorType, str]:
+    """Detect selector type and normalize expression.
+
+    - Starts with `/` or `!` → XPath (strip leading `!`)
+    - Otherwise → CSS selector
+    """
+    expr = expr.strip()
+    if expr.startswith(("!", "/")):
+        return SelectorType.XPATH, expr.lstrip("!")
+    return SelectorType.CSS, expr
 
 
 # A configurable set of HTML inline elements. You can override this from
@@ -144,15 +178,96 @@ def _write_output(path: str | None, content: str, encoding: str) -> None:
         sys.stdout.buffer.write(data)
 
 
-def _apply_removals(soup: BeautifulSoup, selectors: list[str] | None) -> None:
-    """Remove nodes matching each selector while keeping their children."""
+def _lxml_unwrap(element) -> None:
+    """Remove an lxml element while preserving its children and text.
 
-    if not selectors:
-        return
+    Equivalent to BeautifulSoup's Tag.unwrap().
+    """
+    parent = element.getparent()
+    if parent is None:
+        return  # Cannot unwrap root element
 
-    for selector in selectors:
-        for tag in list(soup.select(selector)):
+    index = list(parent).index(element)
+
+    # Handle element's text (goes before first child or to parent/prev sibling)
+    if element.text:
+        if index > 0:
+            prev_sibling = parent[index - 1]
+            prev_sibling.tail = (prev_sibling.tail or "") + element.text
+        else:
+            parent.text = (parent.text or "") + element.text
+
+    # Move all children to parent at element's position
+    children = list(element)
+    for i, child in enumerate(children):
+        parent.insert(index + i, child)
+
+    # Handle element's tail text
+    if element.tail:
+        if children:
+            children[-1].tail = (children[-1].tail or "") + element.tail
+        elif index > 0:
+            prev_sibling = parent[index - 1]
+            prev_sibling.tail = (prev_sibling.tail or "") + element.tail
+        else:
+            parent.text = (parent.text or "") + element.tail
+
+    parent.remove(element)
+
+
+def _apply_css_removal(soup: BeautifulSoup, selector: str, recursive: bool) -> None:
+    """Apply CSS selector removal to BeautifulSoup tree."""
+    for tag in list(soup.select(selector)):
+        if recursive:
+            tag.decompose()
+        else:
             tag.unwrap()
+
+
+def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
+    """Apply XPath removal to lxml tree.
+
+    Handles elements, attributes, and other node types.
+    """
+    try:
+        results = tree.xpath(xpath)
+    except Exception as e:
+        raise ValueError(f"Invalid XPath expression '{xpath}': {e}") from e
+
+    for result in reversed(list(results)):
+        # Check if result is an lxml Element
+        if hasattr(result, "getparent") and hasattr(result, "tag"):
+            if recursive:
+                parent = result.getparent()
+                if parent is not None:
+                    parent.remove(result)
+            else:
+                _lxml_unwrap(result)
+        # Check if result is an attribute (lxml returns these as strings via attrib)
+        elif isinstance(result, str):
+            # For attribute results, we need to find the parent element
+            # XPath like //@onclick returns attribute values, not nodes
+            # We need to handle this specially by re-querying
+            pass  # Handled below with special attribute detection
+
+    # Special handling for attribute XPaths (ending with /@attrname)
+    if xpath.endswith("]"):
+        return  # Not a simple attribute selection
+
+    # Match patterns like //div/@onclick or //@onclick (select all)
+    attr_match = re.match(r"^(.*?)/@([a-zA-Z_][\w.-]*)$", xpath)
+    if attr_match:
+        element_xpath, attr_name = attr_match.groups()
+        # If no element path, select all elements with that attribute
+        if not element_xpath or element_xpath == "/":
+            element_xpath = f"//*[@{attr_name}]"
+        try:
+            elements = tree.xpath(element_xpath)
+        except Exception:
+            return
+        for elem in elements:
+            if hasattr(elem, "attrib") and attr_name in elem.attrib:
+                del elem.attrib[attr_name]
 
 
 def _parser_available(name: str) -> bool:
@@ -317,6 +432,17 @@ def _inline_aware_prettify(
     return "\n".join(lines)
 
 
+class _AppendRemoval(argparse.Action):
+    """Custom action to collect -r and -R removals in order."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not hasattr(namespace, "all_removals") or namespace.all_removals is None:
+            namespace.all_removals = []
+        # Track whether this is recursive (-R) or unwrap (-r)
+        recursive = option_string in ("-R", "--re-remove")
+        namespace.all_removals.append((values, recursive))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="soupson",
@@ -354,9 +480,18 @@ def main() -> None:
     parser.add_argument(
         "-r",
         "--remove",
-        dest="removals",
-        action="append",
-        help="CSS selector; matching nodes are removed but their children stay",
+        action=_AppendRemoval,
+        metavar="EXPR",
+        help="Remove matching elements but keep children (unwrap). "
+        "CSS by default; XPath if starts with / or !",
+    )
+    parser.add_argument(
+        "-R",
+        "--re-remove",
+        action=_AppendRemoval,
+        metavar="EXPR",
+        help="Remove matching elements and all descendants (recursive). "
+        "CSS by default; XPath if starts with / or !",
     )
     parser.add_argument(
         "-p",
@@ -386,6 +521,27 @@ def main() -> None:
 
     source_text = _read_input(args.infile, args.encoding)
 
+    # Get all removals (list of (expr, recursive) tuples)
+    all_removals: list[tuple[str, bool]] = getattr(args, "all_removals", None) or []
+
+    # Check if any removals use XPath
+    has_xpath = any(
+        _parse_selector(expr)[0] == SelectorType.XPATH for expr, _ in all_removals
+    )
+
+    # Validate XPath requirements
+    if has_xpath:
+        if not LXML_AVAILABLE:
+            parser.error(
+                "XPath expressions require lxml. Install it with: pip install lxml"
+            )
+        lxml_parsers = {"lxml", "lxml-xml", "xml"}
+        if args.parser != "auto" and args.parser not in lxml_parsers:
+            parser.error(
+                f"XPath expressions require an lxml-based parser "
+                f"(lxml, lxml-xml, or xml), not '{args.parser}'."
+            )
+
     if args.parser != "auto":
         if not _parser_available(args.parser):
             parser.error(
@@ -394,10 +550,38 @@ def main() -> None:
             )
         parser_name = args.parser
     else:
-        parser_name = _select_parser(args.format == "xml")
+        # Force lxml if XPath is used
+        if has_xpath:
+            parser_name = "lxml-xml" if args.format == "xml" else "lxml"
+        else:
+            parser_name = _select_parser(args.format == "xml")
 
     soup = BeautifulSoup(source_text, parser_name)
-    _apply_removals(soup, args.removals)
+
+    # Apply removals in command-line order
+    lxml_tree = None
+    for expr, recursive in all_removals:
+        selector_type, selector = _parse_selector(expr)
+        if selector_type == SelectorType.CSS:
+            _apply_css_removal(soup, selector, recursive)
+        else:
+            # XPath: need to work with lxml tree
+            if lxml_tree is None:
+                # Convert soup to lxml tree
+                if args.format == "xml":
+                    lxml_tree = lxml_etree.fromstring(str(soup).encode("utf-8"))
+                else:
+                    lxml_tree = lxml_html_fromstring(str(soup))
+            _apply_xpath_removal(lxml_tree, selector, recursive)
+
+    # If we used XPath, convert lxml tree back to BeautifulSoup
+    if lxml_tree is not None:
+        if args.format == "xml":
+            modified_markup = lxml_etree.tostring(lxml_tree, encoding="unicode")
+        else:
+            modified_markup = lxml_html_tostring(lxml_tree, encoding="unicode")
+        soup = BeautifulSoup(modified_markup, parser_name)
+
     formatter = "html" if args.format == "html" else "minimal"
     if args.pretty_inline and args.format == "html":
         pretty_raw = _inline_aware_prettify(soup, formatter=formatter)
