@@ -26,6 +26,10 @@ all = [
     "html5lib>=1.1",
     "lxml>=6.0.2",
 ]
+dev = [
+    "pytest>=8.0.0",
+    "lxml>=6.0.2",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
