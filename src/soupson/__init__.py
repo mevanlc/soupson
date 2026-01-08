@@ -9,7 +9,7 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Collection
 
-from bs4 import UnicodeDammit
+from charset_normalizer import from_bytes as detect_encoding
 from lxml import etree
 from lxml.html import fromstring as html_fromstring, tostring as html_tostring
 from lxml.cssselect import CSSSelector
@@ -113,9 +113,10 @@ def _read_input(path: str | None, charset: str | None) -> str:
     if charset:
         return raw.decode(charset, errors="replace")
 
-    dammit = UnicodeDammit(raw)
-    if dammit.unicode_markup:
-        return dammit.unicode_markup
+    # Use charset-normalizer for encoding detection
+    result = detect_encoding(raw).best()
+    if result is not None:
+        return str(result)
 
     # Fallback if detection fails.
     return raw.decode("utf-8", errors="replace")
@@ -246,6 +247,108 @@ def _apply_regex_removal(tree, target: str, pattern: str, recursive: bool) -> No
             ]
             for name in to_remove:
                 del elem.attrib[name]
+    else:
+        raise ValueError(f"Invalid regex target '{target}': must be 'e', 'a', or 'v'")
+
+
+def _apply_xpath_substitution(tree, xpath: str, pattern: str, replacement: str) -> None:
+    """Apply substitution to attribute values matched by XPath.
+
+    Args:
+        tree: lxml tree to modify
+        xpath: XPath expression selecting attributes (e.g., //@href)
+        pattern: regex pattern to find
+        replacement: replacement string (supports backreferences)
+    """
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    try:
+        results = tree.xpath(xpath)
+    except Exception as e:
+        raise ValueError(f"Invalid XPath expression '{xpath}': {e}") from e
+
+    for result in results:
+        # Attribute result (lxml returns smart strings with metadata)
+        if hasattr(result, "is_attribute") and result.is_attribute:
+            parent = result.getparent()
+            attrname = result.attrname
+            if parent is not None and attrname in parent.attrib:
+                old_value = parent.attrib[attrname]
+                new_value = regex.sub(replacement, old_value)
+                parent.attrib[attrname] = new_value
+
+
+def _apply_css_substitution(
+    tree, selector: str, attr: str, pattern: str, replacement: str
+) -> None:
+    """Apply substitution to attribute values on elements matched by CSS selector.
+
+    Args:
+        tree: lxml tree to modify
+        selector: CSS selector to match elements
+        attr: attribute name to modify on matched elements
+        pattern: regex pattern to find
+        replacement: replacement string (supports backreferences)
+    """
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    try:
+        css = CSSSelector(selector)
+    except Exception as e:
+        raise ValueError(f"Invalid CSS selector '{selector}': {e}") from e
+
+    for elem in css(tree):
+        if attr in elem.attrib:
+            old_value = elem.attrib[attr]
+            new_value = regex.sub(replacement, old_value)
+            elem.attrib[attr] = new_value
+
+
+def _apply_regex_substitution(tree, target: str, pattern: str, replacement: str) -> None:
+    """Apply regex-based substitution to lxml tree.
+
+    Args:
+        tree: lxml tree to modify
+        target: 'e' for element names, 'a' for attr names, 'v' for attr values
+        pattern: regex pattern to find
+        replacement: replacement string (supports backreferences)
+    """
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    if target == "e":
+        # Substitute in element names (rename tags)
+        for elem in tree.iter():
+            if isinstance(elem.tag, str) and regex.search(elem.tag):
+                elem.tag = regex.sub(replacement, elem.tag)
+    elif target == "a":
+        # Substitute in attribute names (rename attributes)
+        for elem in tree.iter():
+            if not isinstance(elem.tag, str):
+                continue
+            # Build new attrib dict with renamed keys
+            new_attrib = {}
+            for name, value in list(elem.attrib.items()):
+                new_name = regex.sub(replacement, name)
+                new_attrib[new_name] = value
+            elem.attrib.clear()
+            elem.attrib.update(new_attrib)
+    elif target == "v":
+        # Substitute in attribute values
+        for elem in tree.iter():
+            if not isinstance(elem.tag, str):
+                continue
+            for name, value in elem.attrib.items():
+                if regex.search(value):
+                    elem.attrib[name] = regex.sub(replacement, value)
     else:
         raise ValueError(f"Invalid regex target '{target}': must be 'e', 'a', or 'v'")
 
@@ -454,10 +557,44 @@ class _AppendRemoval(argparse.Action):
         namespace.all_removals.append(removal)
 
 
+class _AppendSubstitution(argparse.Action):
+    """Custom action to collect substitutions in command-line order."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not hasattr(namespace, "all_substitutions") or namespace.all_substitutions is None:
+            namespace.all_substitutions = []
+
+        # -sx = xpath, -sc = css, -se = regex
+        suffix = option_string[2:]  # after "-s"
+
+        if suffix == "x":
+            # values: [xpath, pattern, replacement]
+            sub = ("xpath", values[0], values[1], values[2])
+        elif suffix == "c":
+            # values: [selector, attr, pattern, replacement]
+            sub = ("css", values[0], values[1], values[2], values[3])
+        elif suffix == "e":
+            # values: [target, pattern, replacement]
+            sub = ("regex", values[0], values[1], values[2])
+        else:
+            raise ValueError(f"Unknown substitution option: {option_string}")
+
+        namespace.all_substitutions.append(sub)
+
+
+def _trace(*args, **kwargs):
+    """Print trace info if SOUPSON_TRACE is set."""
+    import os
+    if os.environ.get("SOUPSON_TRACE"):
+        print("[TRACE]", *args, **kwargs, file=sys.stderr)
+
+
 def main() -> None:
+    _trace("argv:", sys.argv)
+
     parser = argparse.ArgumentParser(
         prog="soupson",
-        description="Stew HTML/XML and serve it back neatly indented.",
+        description="Stew HTML/XML and serve it back cooked to order.",
     )
     parser.add_argument("infile", nargs="?", help="Input file (default: stdin)")
     parser.add_argument("outfile", nargs="?", help="Output file (default: stdout)")
@@ -533,6 +670,33 @@ def main() -> None:
         help="Remove by regex (recursive). TARGET: e=element name, a=attr name, v=attr value",
     )
 
+    # XPath substitutions
+    parser.add_argument(
+        "-sx",
+        action=_AppendSubstitution,
+        nargs=3,
+        metavar=("XPATH", "PATTERN", "REPLACEMENT"),
+        help="Substitute in attribute values matched by XPath",
+    )
+
+    # CSS selector substitutions
+    parser.add_argument(
+        "-sc",
+        action=_AppendSubstitution,
+        nargs=4,
+        metavar=("SELECTOR", "ATTR", "PATTERN", "REPLACEMENT"),
+        help="Substitute in attribute values of elements matched by CSS selector",
+    )
+
+    # Regex substitutions
+    parser.add_argument(
+        "-se",
+        action=_AppendSubstitution,
+        nargs=3,
+        metavar=("TARGET", "PATTERN", "REPLACEMENT"),
+        help="Substitute by regex. TARGET: e=element name, a=attr name, v=attr value",
+    )
+
     parser.add_argument(
         "--pretty-inline",
         action=argparse.BooleanOptionalAction,
@@ -544,6 +708,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    _trace("parsed args:", args)
+    _trace("all_removals:", getattr(args, "all_removals", None))
+    _trace("all_substitutions:", getattr(args, "all_substitutions", None))
 
     source_text = _read_input(args.infile, args.charset)
 
@@ -565,6 +732,24 @@ def main() -> None:
         elif removal_type == "regex":
             target, pattern = value
             _apply_regex_removal(tree, target, pattern, recursive)
+
+    # Get all substitutions
+    all_substitutions = getattr(args, "all_substitutions", None) or []
+
+    # Apply substitutions in command-line order
+    _trace("applying substitutions:", all_substitutions)
+    for sub in all_substitutions:
+        sub_type = sub[0]
+        _trace("  applying sub:", sub)
+        if sub_type == "xpath":
+            _, xpath, pattern, replacement = sub
+            _apply_xpath_substitution(tree, xpath, pattern, replacement)
+        elif sub_type == "css":
+            _, selector, attr, pattern, replacement = sub
+            _apply_css_substitution(tree, selector, attr, pattern, replacement)
+        elif sub_type == "regex":
+            _, target, pattern, replacement = sub
+            _apply_regex_substitution(tree, target, pattern, replacement)
 
     # Pretty print
     if args.pretty_inline and args.format == "html":

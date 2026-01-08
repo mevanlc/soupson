@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "beautifulsoup4>=4.14.2",  # For UnicodeDammit encoding detection
+    "charset-normalizer>=3.0.0",
     "lxml>=6.0.2",
     "cssselect>=1.2.0",
 ]
