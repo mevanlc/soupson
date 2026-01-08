@@ -323,3 +323,76 @@ class TestEdgeCases:
         assert "<span" not in result.stdout
         assert "<em" not in result.stdout
         assert "text" in result.stdout
+
+
+class TestFragmentPreservation:
+    """Tests for HTML fragment preservation (no unwanted html/body wrapping)."""
+
+    def test_fragment_no_wrapper(self):
+        """Fragment input should not get wrapped in html/body."""
+        import subprocess
+
+        html = '<div id="foo"><p>text</p></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<html" not in result.stdout
+        assert "<body" not in result.stdout
+        assert "<div" in result.stdout
+        assert "text" in result.stdout
+
+    def test_fragment_preserved_after_xpath(self):
+        """Fragment should stay unwrapped after XPath operations."""
+        import subprocess
+
+        html = '<div id="foo" onclick="x()"><p>text</p></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-r", "//@onclick"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<html" not in result.stdout
+        assert "<body" not in result.stdout
+        assert "<div" in result.stdout
+        assert "onclick" not in result.stdout
+
+    def test_fragment_preserved_after_css(self):
+        """Fragment should stay unwrapped after CSS operations."""
+        import subprocess
+
+        html = '<div><span class="remove">gone</span><p>text</p></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-R", ".remove"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<html" not in result.stdout
+        assert "<body" not in result.stdout
+        assert "<div" in result.stdout
+        assert "gone" not in result.stdout
+        assert "text" in result.stdout
+
+    def test_full_document_preserved(self):
+        """Full HTML document should keep its structure."""
+        import subprocess
+
+        html = '<!DOCTYPE html><html><head><title>Test</title></head><body><p>text</p></body></html>'
+        result = subprocess.run(
+            ["uv", "run", "soupson"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<html" in result.stdout
+        assert "<body" in result.stdout
+        assert "<head" in result.stdout
+        assert "text" in result.stdout
