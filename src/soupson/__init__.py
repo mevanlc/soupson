@@ -604,28 +604,28 @@ def main() -> None:
     parser.add_argument("outfile", nargs="?", help="Output file (default: stdout)")
     parser.add_argument(
         "-i",
-        "--indent",
+        dest="indent",
         type=int,
         default=2,
         help="Number of spaces to use for indentation (default: 2)",
     )
     parser.add_argument(
         "-f",
-        "--format",
-        choices=["xml", "html", "htmlpart"],
-        default="html",
-        help="Output format: html (full document), htmlpart (fragment), xml (default: html)",
+        choices=["xml", "html", "ht"],
+        default="ht",
+        dest="format",
+        help="Output format: html (full document), ht (fragment), xml (default: ht)",
     )
     parser.add_argument(
         "-c",
-        "--charset",
+        metavar="NAME",
         dest="charset",
         help="Interpret input using this character set (default: guess)",
     )
     parser.add_argument(
         "-C",
-        "--out-charset",
         dest="out_charset",
+        metavar="NAME",
         default="utf-8",
         help="Output using this character set (default: UTF-8)",
     )
@@ -634,7 +634,7 @@ def main() -> None:
     parser.add_argument(
         "-rx",
         action=_AppendRemoval,
-        metavar="XPATH",
+        metavar=" XPATH",
         help="Remove elements matching XPath (unwrap, keep children)",
     )
     parser.add_argument(
@@ -648,7 +648,7 @@ def main() -> None:
     parser.add_argument(
         "-rs",
         action=_AppendRemoval,
-        metavar="SELECTOR",
+        metavar=" SELECTOR",
         help="Remove elements matching CSS selector (unwrap, keep children)",
     )
     parser.add_argument(
@@ -663,7 +663,7 @@ def main() -> None:
         "-re",
         action=_AppendRemoval,
         nargs=2,
-        metavar=("TARGET", "PATTERN"),
+        metavar=(" TARGET", "PATTERN"),
         help="Remove by regex (unwrap). TARGET: e=element name, a=attr name, v=attr value",
     )
     parser.add_argument(
@@ -679,7 +679,7 @@ def main() -> None:
         "-sx",
         action=_AppendSubstitution,
         nargs=3,
-        metavar=("XPATH", "PATTERN", "REPLACEMENT"),
+        metavar=("XPATH", "PATT", "REPL"),
         help="Substitute in attribute values matched by XPath",
     )
 
@@ -688,7 +688,7 @@ def main() -> None:
         "-sc",
         action=_AppendSubstitution,
         nargs=4,
-        metavar=("SELECTOR", "ATTR", "PATTERN", "REPLACEMENT"),
+        metavar=("SEL", "ATTR", "PAT", "REP"),
         help="Substitute in attribute values of elements matched by CSS selector",
     )
 
@@ -697,12 +697,12 @@ def main() -> None:
         "-se",
         action=_AppendSubstitution,
         nargs=3,
-        metavar=("TARGET", "PATTERN", "REPLACEMENT"),
+        metavar=("TARGET", "PATT", "REPL"),
         help="Substitute by regex. TARGET: e=element name, a=attr name, v=attr value",
     )
 
     parser.add_argument(
-        "--pretty-inline",
+        "--inl",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
@@ -724,7 +724,7 @@ def main() -> None:
     elif args.format == "html":
         # Full document mode - ensure <html><body> structure
         tree = html_document_fromstring(source_text)
-    else:  # htmlpart
+    else:  # ht
         # Fragment mode - preserve input structure
         tree = html_fromstring(source_text)
 
@@ -760,7 +760,7 @@ def main() -> None:
             _apply_regex_substitution(tree, target, pattern, replacement)
 
     # Pretty print
-    if args.pretty_inline and args.format in ("html", "htmlpart"):
+    if args.pretty_inline and args.format in ("html", "ht"):
         pretty_raw = _inline_aware_prettify(
             tree,
             indent_str="  ",
@@ -771,7 +771,7 @@ def main() -> None:
         etree.indent(tree, space="  ")
         if args.format == "xml":
             pretty_raw = etree.tostring(tree, encoding="unicode")
-        else:  # html or htmlpart
+        else:  # html or ht
             pretty_raw = html_tostring(tree, encoding="unicode")
 
     pretty = _reindent(pretty_raw, args.indent)
