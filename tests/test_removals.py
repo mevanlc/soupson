@@ -278,15 +278,15 @@ class TestEdgeCases:
 
 
 class TestFragmentPreservation:
-    """Tests for HTML fragment preservation (no unwanted html/body wrapping)."""
+    """Tests for HTML fragment preservation with -f htmlpart."""
 
     def test_fragment_no_wrapper(self):
-        """Fragment input should not get wrapped in html/body."""
+        """Fragment input should not get wrapped in html/body with -f htmlpart."""
         import subprocess
 
         html = '<div id="foo"><p>text</p></div>'
         result = subprocess.run(
-            ["uv", "run", "soupson"],
+            ["uv", "run", "soupson", "-f", "htmlpart"],
             input=html,
             capture_output=True,
             text=True,
@@ -298,12 +298,12 @@ class TestFragmentPreservation:
         assert "text" in result.stdout
 
     def test_fragment_preserved_after_xpath(self):
-        """Fragment should stay unwrapped after XPath operations."""
+        """Fragment should stay unwrapped after XPath operations with -f htmlpart."""
         import subprocess
 
         html = '<div id="foo" onclick="x()"><p>text</p></div>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-rx", "//@onclick"],
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rx", "//@onclick"],
             input=html,
             capture_output=True,
             text=True,
@@ -315,12 +315,12 @@ class TestFragmentPreservation:
         assert "onclick" not in result.stdout
 
     def test_fragment_preserved_after_css(self):
-        """Fragment should stay unwrapped after CSS operations."""
+        """Fragment should stay unwrapped after CSS operations with -f htmlpart."""
         import subprocess
 
         html = '<div><span class="remove">gone</span><p>text</p></div>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-rrs", ".remove"],
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrs", ".remove"],
             input=html,
             capture_output=True,
             text=True,
@@ -347,4 +347,21 @@ class TestFragmentPreservation:
         assert "<html" in result.stdout
         assert "<body" in result.stdout
         assert "<head" in result.stdout
+        assert "text" in result.stdout
+
+    def test_fragment_wrapped_with_html_format(self):
+        """Fragment input should get wrapped in html/body with default -f html."""
+        import subprocess
+
+        html = '<div id="foo"><p>text</p></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "html"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<html" in result.stdout
+        assert "<body" in result.stdout
+        assert "<div" in result.stdout
         assert "text" in result.stdout

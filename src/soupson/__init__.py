@@ -11,7 +11,11 @@ from typing import Collection
 
 from charset_normalizer import from_bytes as detect_encoding
 from lxml import etree
-from lxml.html import fromstring as html_fromstring, tostring as html_tostring
+from lxml.html import (
+    document_fromstring as html_document_fromstring,
+    fromstring as html_fromstring,
+    tostring as html_tostring,
+)
 from lxml.cssselect import CSSSelector
 
 
@@ -608,9 +612,9 @@ def main() -> None:
     parser.add_argument(
         "-f",
         "--format",
-        choices=["xml", "html"],
+        choices=["xml", "html", "htmlpart"],
         default="html",
-        help="Output tag format (default: html)",
+        help="Output format: html (full document), htmlpart (fragment), xml (default: html)",
     )
     parser.add_argument(
         "-c",
@@ -717,7 +721,11 @@ def main() -> None:
     # Parse with lxml
     if args.format == "xml":
         tree = etree.fromstring(source_text.encode("utf-8"))
-    else:
+    elif args.format == "html":
+        # Full document mode - ensure <html><body> structure
+        tree = html_document_fromstring(source_text)
+    else:  # htmlpart
+        # Fragment mode - preserve input structure
         tree = html_fromstring(source_text)
 
     # Get all removals (list of (type, value(s), recursive) tuples)
@@ -752,7 +760,7 @@ def main() -> None:
             _apply_regex_substitution(tree, target, pattern, replacement)
 
     # Pretty print
-    if args.pretty_inline and args.format == "html":
+    if args.pretty_inline and args.format in ("html", "htmlpart"):
         pretty_raw = _inline_aware_prettify(
             tree,
             indent_str="  ",
@@ -763,7 +771,7 @@ def main() -> None:
         etree.indent(tree, space="  ")
         if args.format == "xml":
             pretty_raw = etree.tostring(tree, encoding="unicode")
-        else:
+        else:  # html or htmlpart
             pretty_raw = html_tostring(tree, encoding="unicode")
 
     pretty = _reindent(pretty_raw, args.indent)
