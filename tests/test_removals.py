@@ -2,8 +2,6 @@
 
 import pytest
 
-from soupson import SelectorType, _parse_selector
-
 # Check if lxml is available
 try:
     import lxml
@@ -11,52 +9,6 @@ try:
     HAS_LXML = True
 except ImportError:
     HAS_LXML = False
-
-
-class TestSelectorParsing:
-    """Tests for selector type detection."""
-
-    def test_css_selector_default(self):
-        """CSS selector is default for normal expressions."""
-        sel_type, selector = _parse_selector(".foo")
-        assert sel_type == SelectorType.CSS
-        assert selector == ".foo"
-
-    def test_css_selector_with_spaces(self):
-        """CSS selector with leading/trailing spaces."""
-        sel_type, selector = _parse_selector("  div.bar  ")
-        assert sel_type == SelectorType.CSS
-        assert selector == "div.bar"
-
-    def test_xpath_single_slash(self):
-        """XPath detected with single slash."""
-        sel_type, selector = _parse_selector("/html/body")
-        assert sel_type == SelectorType.XPATH
-        assert selector == "/html/body"
-
-    def test_xpath_double_slash(self):
-        """XPath detected with double slash."""
-        sel_type, selector = _parse_selector("//div")
-        assert sel_type == SelectorType.XPATH
-        assert selector == "//div"
-
-    def test_xpath_explicit_bang(self):
-        """XPath with explicit ! prefix."""
-        sel_type, selector = _parse_selector("!div[@id]")
-        assert sel_type == SelectorType.XPATH
-        assert selector == "div[@id]"
-
-    def test_xpath_attribute(self):
-        """XPath selecting attributes."""
-        sel_type, selector = _parse_selector("//@onclick")
-        assert sel_type == SelectorType.XPATH
-        assert selector == "//@onclick"
-
-    def test_xpath_bang_with_slash(self):
-        """XPath with both ! and / should strip !."""
-        sel_type, selector = _parse_selector("!//script")
-        assert sel_type == SelectorType.XPATH
-        assert selector == "//script"
 
 
 class TestCSSRemovals:
@@ -68,7 +20,7 @@ class TestCSSRemovals:
 
         html = '<html><body><div class="ad">content</div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", ".ad"],
+            ["uv", "run", "soupson", "-rs", ".ad"],
             input=html,
             capture_output=True,
             text=True,
@@ -83,7 +35,7 @@ class TestCSSRemovals:
 
         html = '<html><body><div class="ad"><span>content</span></div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-R", ".ad"],
+            ["uv", "run", "soupson", "-rrs", ".ad"],
             input=html,
             capture_output=True,
             text=True,
@@ -98,7 +50,7 @@ class TestCSSRemovals:
 
         html = '<html><body><div class="ad">ad</div><span class="junk">junk</span></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", ".ad", "-r", ".junk"],
+            ["uv", "run", "soupson", "-rs", ".ad", "-rs", ".junk"],
             input=html,
             capture_output=True,
             text=True,
@@ -120,7 +72,7 @@ class TestXPathRemovals:
 
         html = "<html><body><script>alert(1)</script></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//script"],
+            ["uv", "run", "soupson", "-rx", "//script"],
             input=html,
             capture_output=True,
             text=True,
@@ -135,7 +87,7 @@ class TestXPathRemovals:
 
         html = "<html><body><script><![CDATA[alert(1)]]></script></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-R", "//script"],
+            ["uv", "run", "soupson", "-rrx", "//script"],
             input=html,
             capture_output=True,
             text=True,
@@ -150,7 +102,7 @@ class TestXPathRemovals:
 
         html = '<html><body><p onclick="x()">text</p></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//@onclick"],
+            ["uv", "run", "soupson", "-rx", "//@onclick"],
             input=html,
             capture_output=True,
             text=True,
@@ -166,7 +118,7 @@ class TestXPathRemovals:
 
         html = '<html><body><div class="ad">ad</div><script>alert(1)</script></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", ".ad", "-r", "//script"],
+            ["uv", "run", "soupson", "-rs", ".ad", "-rx", "//script"],
             input=html,
             capture_output=True,
             text=True,
@@ -177,13 +129,13 @@ class TestXPathRemovals:
         assert "ad" in result.stdout
         assert "alert(1)" in result.stdout
 
-    def test_xpath_explicit_bang_prefix(self):
-        """Test XPath with explicit ! prefix."""
+    def test_xpath_element_with_predicate(self):
+        """Test XPath selecting element with attribute predicate."""
         import subprocess
 
         html = '<html><body><div id="test">content</div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "!//div[@id='test']"],
+            ["uv", "run", "soupson", "-rx", "//div[@id='test']"],
             input=html,
             capture_output=True,
             text=True,
@@ -208,12 +160,12 @@ class TestErrorHandling:
 
         html = "<html><body><div>test</div></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "[[[invalid"],
+            ["uv", "run", "soupson", "-rs", "[[[invalid"],
             input=html,
             capture_output=True,
             text=True,
         )
-        # BeautifulSoup may handle this gracefully or error
+        # cssselect may handle this gracefully or error
         # Just verify it doesn't crash silently
         assert result.returncode in (0, 1, 2)
 
@@ -224,7 +176,7 @@ class TestErrorHandling:
 
         html = "<html><body><div>test</div></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//[[[invalid"],
+            ["uv", "run", "soupson", "-rx", "//[[[invalid"],
             input=html,
             capture_output=True,
             text=True,
@@ -244,7 +196,7 @@ class TestEdgeCases:
 
         html = "<html><body><script>1</script><script>2</script></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-R", "//script"],
+            ["uv", "run", "soupson", "-rrx", "//script"],
             input=html,
             capture_output=True,
             text=True,
@@ -261,7 +213,7 @@ class TestEdgeCases:
 
         html = '<html><body><p onclick="a()">1</p><div onclick="b()">2</div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//@onclick"],
+            ["uv", "run", "soupson", "-rx", "//@onclick"],
             input=html,
             capture_output=True,
             text=True,
@@ -278,7 +230,7 @@ class TestEdgeCases:
 
         html = '<html><body><div id="foo" class="bar"><p style="x" data-x="y">text</p></div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//@*"],
+            ["uv", "run", "soupson", "-rx", "//@*"],
             input=html,
             capture_output=True,
             text=True,
@@ -297,7 +249,7 @@ class TestEdgeCases:
 
         html = '<html><body><div id="keep" class="a"><div id="remove" class="b">text</div></div></body></html>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//div[@class='b']/@id"],
+            ["uv", "run", "soupson", "-rx", "//div[@class='b']/@id"],
             input=html,
             capture_output=True,
             text=True,
@@ -314,7 +266,7 @@ class TestEdgeCases:
 
         html = "<html><body><div><span><em>text</em></span></div></body></html>"
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "span", "-r", "em"],
+            ["uv", "run", "soupson", "-rs", "span", "-rs", "em"],
             input=html,
             capture_output=True,
             text=True,
@@ -351,7 +303,7 @@ class TestFragmentPreservation:
 
         html = '<div id="foo" onclick="x()"><p>text</p></div>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-r", "//@onclick"],
+            ["uv", "run", "soupson", "-rx", "//@onclick"],
             input=html,
             capture_output=True,
             text=True,
@@ -368,7 +320,7 @@ class TestFragmentPreservation:
 
         html = '<div><span class="remove">gone</span><p>text</p></div>'
         result = subprocess.run(
-            ["uv", "run", "soupson", "-R", ".remove"],
+            ["uv", "run", "soupson", "-rrs", ".remove"],
             input=html,
             capture_output=True,
             text=True,
