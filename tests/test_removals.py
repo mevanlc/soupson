@@ -271,6 +271,43 @@ class TestEdgeCases:
         assert "1" in result.stdout
         assert "2" in result.stdout
 
+    @pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
+    def test_remove_all_attributes_wildcard(self):
+        """Test //@* removes all attributes from all elements."""
+        import subprocess
+
+        html = '<html><body><div id="foo" class="bar"><p style="x" data-x="y">text</p></div></body></html>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-r", "//@*"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "id=" not in result.stdout
+        assert "class=" not in result.stdout
+        assert "style=" not in result.stdout
+        assert "data-x=" not in result.stdout
+        assert "text" in result.stdout
+
+    @pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
+    def test_remove_attribute_with_predicate(self):
+        """Test removing attributes from elements matching a predicate."""
+        import subprocess
+
+        html = '<html><body><div id="keep" class="a"><div id="remove" class="b">text</div></div></body></html>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-r", "//div[@class='b']/@id"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert 'id="keep"' in result.stdout
+        assert 'id="remove"' not in result.stdout
+        assert 'class="a"' in result.stdout
+        assert 'class="b"' in result.stdout
+
     def test_nested_removals(self):
         """Test nested element removals."""
         import subprocess

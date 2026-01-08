@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from enum import Enum
 from pathlib import Path
@@ -227,7 +226,7 @@ def _apply_css_removal(soup: BeautifulSoup, selector: str, recursive: bool) -> N
 def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
     """Apply XPath removal to lxml tree.
 
-    Handles elements, attributes, and other node types.
+    Handles elements and attributes via lxml's smart string results.
     """
     try:
         results = tree.xpath(xpath)
@@ -235,39 +234,19 @@ def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
         raise ValueError(f"Invalid XPath expression '{xpath}': {e}") from e
 
     for result in reversed(list(results)):
-        # Check if result is an lxml Element
-        if hasattr(result, "getparent") and hasattr(result, "tag"):
+        # Attribute result (lxml returns smart strings with metadata)
+        if hasattr(result, "is_attribute") and result.is_attribute:
+            parent = result.getparent()
+            if parent is not None and result.attrname in parent.attrib:
+                del parent.attrib[result.attrname]
+        # Element result
+        elif hasattr(result, "getparent") and hasattr(result, "tag"):
             if recursive:
                 parent = result.getparent()
                 if parent is not None:
                     parent.remove(result)
             else:
                 _lxml_unwrap(result)
-        # Check if result is an attribute (lxml returns these as strings via attrib)
-        elif isinstance(result, str):
-            # For attribute results, we need to find the parent element
-            # XPath like //@onclick returns attribute values, not nodes
-            # We need to handle this specially by re-querying
-            pass  # Handled below with special attribute detection
-
-    # Special handling for attribute XPaths (ending with /@attrname)
-    if xpath.endswith("]"):
-        return  # Not a simple attribute selection
-
-    # Match patterns like //div/@onclick or //@onclick (select all)
-    attr_match = re.match(r"^(.*?)/@([a-zA-Z_][\w.-]*)$", xpath)
-    if attr_match:
-        element_xpath, attr_name = attr_match.groups()
-        # If no element path, select all elements with that attribute
-        if not element_xpath or element_xpath == "/":
-            element_xpath = f"//*[@{attr_name}]"
-        try:
-            elements = tree.xpath(element_xpath)
-        except Exception:
-            return
-        for elem in elements:
-            if hasattr(elem, "attrib") and attr_name in elem.attrib:
-                del elem.attrib[attr_name]
 
 
 def _parser_available(name: str) -> bool:
