@@ -5,25 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 from enum import Enum
+from html import escape as html_escape
 from pathlib import Path
-from typing import Iterable, Collection
+from typing import Collection
 
-from bs4 import BeautifulSoup, UnicodeDammit
-
-# Optional lxml import for XPath support
-try:
-    from lxml import etree as lxml_etree
-    from lxml.html import document_fromstring as lxml_html_fromstring
-    from lxml.html import tostring as lxml_html_tostring
-
-    LXML_AVAILABLE = True
-except ImportError:
-    lxml_etree = None  # type: ignore[assignment]
-    lxml_html_fromstring = None  # type: ignore[assignment]
-    lxml_html_tostring = None  # type: ignore[assignment]
-    LXML_AVAILABLE = False
-from bs4.element import Tag, NavigableString
-from bs4.formatter import Formatter
+from bs4 import UnicodeDammit
+from lxml import etree
+from lxml.html import fromstring as html_fromstring, tostring as html_tostring
+from lxml.cssselect import CSSSelector
 
 
 class SelectorType(Enum):
@@ -91,6 +80,9 @@ HTML_INLINE_TAGS: set[str] = {
     "wbr",
 }
 
+# Tags that should preserve internal whitespace
+PRESERVE_WHITESPACE_TAGS: set[str] = {"pre", "script", "style", "textarea"}
+
 
 def _detect_base_indent(lines: list[str]) -> int:
     """Find the smallest non-zero leading space count."""
@@ -125,27 +117,6 @@ def _reindent(text: str, indent_width: int) -> str:
             adjusted.append("" if line else line)
 
     return "\n".join(adjusted)
-
-
-def _select_parser(prefer_xml: bool) -> str:
-    """Pick the best available BeautifulSoup parser for the requested format."""
-
-    candidates: Iterable[str]
-    if prefer_xml:
-        candidates = ("lxml-xml", "xml")
-    else:
-        candidates = ("lxml", "html.parser")
-
-    for parser in candidates:
-        try:
-            # Instantiation with an empty doc is cheap; parser availability is the
-            # important part here.
-            BeautifulSoup("", parser)
-        except Exception:
-            continue
-        return parser
-
-    raise RuntimeError("No suitable parser available. Install 'lxml' to continue.")
 
 
 def _read_input(path: str | None, encoding: str | None) -> str:
@@ -214,13 +185,20 @@ def _lxml_unwrap(element) -> None:
     parent.remove(element)
 
 
-def _apply_css_removal(soup: BeautifulSoup, selector: str, recursive: bool) -> None:
-    """Apply CSS selector removal to BeautifulSoup tree."""
-    for tag in list(soup.select(selector)):
+def _apply_css_removal(tree, selector: str, recursive: bool) -> None:
+    """Apply CSS selector removal to lxml tree."""
+    try:
+        css = CSSSelector(selector)
+    except Exception as e:
+        raise ValueError(f"Invalid CSS selector '{selector}': {e}") from e
+
+    for elem in reversed(css(tree)):
         if recursive:
-            tag.decompose()
+            parent = elem.getparent()
+            if parent is not None:
+                parent.remove(elem)
         else:
-            tag.unwrap()
+            _lxml_unwrap(elem)
 
 
 def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
@@ -249,164 +227,177 @@ def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
                 _lxml_unwrap(result)
 
 
-def _parser_available(name: str) -> bool:
-    try:
-        BeautifulSoup("", name)
-    except Exception:
-        return False
-    return True
+def _format_open_tag(elem, html_format: bool = True) -> str:
+    """Format an opening tag with attributes."""
+    tag_name = elem.tag if isinstance(elem.tag, str) else "unknown"
+
+    attrs = []
+    for key, value in elem.attrib.items():
+        if value is None:
+            attrs.append(key)
+        else:
+            escaped = html_escape(value, quote=True)
+            attrs.append(f'{key}="{escaped}"')
+
+    if attrs:
+        return f"<{tag_name} {' '.join(attrs)}>"
+    return f"<{tag_name}>"
+
+
+def _format_close_tag(elem) -> str:
+    """Format a closing tag."""
+    tag_name = elem.tag if isinstance(elem.tag, str) else "unknown"
+    return f"</{tag_name}>"
+
+
+def _is_void_element(tag_name: str) -> bool:
+    """Check if an HTML tag is a void element (self-closing)."""
+    return tag_name.lower() in {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr"
+    }
 
 
 def _inline_aware_prettify(
-    soup: BeautifulSoup,
-    formatter: str | Formatter,
+    tree,
+    indent_str: str = "  ",
     inline_tag_set: Collection[str] | None = None,
+    html_format: bool = True,
 ) -> str:
-    """Pretty-print HTML while keeping inline elements on a single line.
+    """Pretty-print HTML/XML while keeping inline elements on a single line.
 
-    This reuses BeautifulSoup's tag and attribute formatting but changes
-    how indentation and newlines are applied so that inline tags (and
-    their text) are rendered together instead of being split across
-    multiple lines.
+    Works directly with lxml elements.
     """
-
-    # Resolve formatter name to a Formatter instance, like Tag.decode does.
-    if not isinstance(formatter, Formatter):
-        # BeautifulSoup/Tag exposes formatter_for_name; type ignore because
-        # the stubs don't declare it on BeautifulSoup.
-        formatter = soup.formatter_for_name(formatter)  # type: ignore[attr-defined]
-
     # Normalize the inline tag set.
     if inline_tag_set is None:
         inline_tag_names: set[str] = {name.lower() for name in HTML_INLINE_TAGS}
     else:
         inline_tag_names = {name.lower() for name in inline_tag_set}
 
-    # Tags like <pre>, <script>, <style> should preserve their internal
-    # whitespace; BS tracks them on the Tag class.
-    preserve_whitespace = getattr(soup, "preserve_whitespace_tags", set()) or set()
-
     lines: list[str] = []
-    indent_unit = formatter.indent
 
-    def is_inline_tag(node: object) -> bool:
-        return isinstance(node, Tag) and (node.name or "").lower() in inline_tag_names
+    def get_tag_name(elem) -> str:
+        return elem.tag.lower() if isinstance(elem.tag, str) else ""
 
-    def is_literal_tag(node: object) -> bool:
-        return isinstance(node, Tag) and node.name in preserve_whitespace
+    def is_inline_tag(elem) -> bool:
+        return get_tag_name(elem) in inline_tag_names
+
+    def is_literal_tag(elem) -> bool:
+        return get_tag_name(elem) in PRESERVE_WHITESPACE_TAGS
 
     def indent(depth: int) -> str:
         if depth <= 0:
             return ""
-        return indent_unit * depth
+        return indent_str * depth
+
+    def collapse_whitespace(text: str) -> str:
+        """Collapse runs of whitespace to single spaces."""
+        result_chars: list[str] = []
+        saw_space = False
+        for ch in text:
+            if ch.isspace():
+                if not saw_space:
+                    result_chars.append(" ")
+                    saw_space = True
+            else:
+                result_chars.append(ch)
+                saw_space = False
+        return "".join(result_chars)
 
     # Inline rendering -----------------------------------------------------
 
-    def render_inline(node: object) -> str:
-        # Render a node and its descendants without introducing line breaks.
-        if isinstance(node, NavigableString):
-            text = node.output_ready(formatter)
-            # Collapse runs of whitespace but preserve whether whitespace
-            # exists at the ends.
-            # Using split / join here would drop leading/trailing spaces, so
-            # do a manual pass.
-            result_chars: list[str] = []
-            saw_space = False
-            for ch in text:
-                if ch.isspace():
-                    if not saw_space:
-                        result_chars.append(" ")
-                        saw_space = True
-                else:
-                    result_chars.append(ch)
-                    saw_space = False
-            return "".join(result_chars)
+    def render_inline(elem) -> str:
+        """Render an element and its descendants without line breaks."""
+        tag_name = get_tag_name(elem)
 
-        if not isinstance(node, Tag):
-            return str(node)
+        # Literal tags keep contents as-is
+        if is_literal_tag(elem):
+            return html_tostring(elem, encoding="unicode")
 
-        # Literal tags (e.g. <pre>) keep their contents as-is.
-        if is_literal_tag(node):
-            return str(node)
+        parts: list[str] = []
 
-        # Treat everything else as inline here, even if it's structurally
-        # block-ish – HTML disallows blocks inside inline contexts anyway.
-        # We intentionally flatten nested inline tags.
-        # BeautifulSoup's internal helpers give us consistent tag markup.
-        from bs4.element import Tag as _Tag  # Local import to satisfy type checkers
+        # Opening tag
+        if html_format and _is_void_element(tag_name):
+            parts.append(_format_open_tag(elem, html_format))
+        else:
+            parts.append(_format_open_tag(elem, html_format))
 
-        tag = node
-        # `_format_tag` uses an eventual encoding mainly for charset
-        # substitution; utf-8 is fine for CLI output before re-encoding.
-        piece_open = tag._format_tag("utf-8", formatter, opening=True)  # type: ignore[attr-defined]
-        children_parts: list[str] = []
-        for child in tag.children:
-            children_parts.append(render_inline(child))
-        piece_close = tag._format_tag("utf-8", formatter, opening=False)  # type: ignore[attr-defined]
-        return piece_open + "".join(children_parts) + piece_close
+            # Text content
+            if elem.text:
+                parts.append(html_escape(collapse_whitespace(elem.text)))
+
+            # Children
+            for child in elem:
+                parts.append(render_inline(child))
+                if child.tail:
+                    parts.append(html_escape(collapse_whitespace(child.tail)))
+
+            # Closing tag
+            if not (html_format and _is_void_element(tag_name)):
+                parts.append(_format_close_tag(elem))
+
+        return "".join(parts)
 
     # Block rendering ------------------------------------------------------
 
-    def render_block(tag: Tag, depth: int) -> None:
-        # Literal tags: don't reflow internal whitespace.
-        if is_literal_tag(tag):
-            open_piece = tag._format_tag("utf-8", formatter, opening=True)  # type: ignore[attr-defined]
-            lines.append(indent(depth) + open_piece)
-            inner = "".join(str(c) for c in tag.contents)
+    def render_block(elem, depth: int) -> None:
+        """Render a block element with proper indentation."""
+        tag_name = get_tag_name(elem)
+
+        # Literal tags: don't reflow internal whitespace
+        if is_literal_tag(elem):
+            lines.append(indent(depth) + _format_open_tag(elem, html_format))
+            inner = (elem.text or "") + "".join(
+                html_tostring(child, encoding="unicode") + (child.tail or "")
+                for child in elem
+            )
             if inner:
                 for raw_line in inner.splitlines():
                     lines.append(indent(depth + 1) + raw_line)
-            close_piece = tag._format_tag("utf-8", formatter, opening=False)  # type: ignore[attr-defined]
-            lines.append(indent(depth) + close_piece)
+            lines.append(indent(depth) + _format_close_tag(elem))
             return
 
-        open_piece = tag._format_tag("utf-8", formatter, opening=True)  # type: ignore[attr-defined]
-        lines.append(indent(depth) + open_piece)
+        # Void elements
+        if html_format and _is_void_element(tag_name):
+            lines.append(indent(depth) + _format_open_tag(elem, html_format))
+            return
 
-        inline_buffer_parts: list[str] = []
+        lines.append(indent(depth) + _format_open_tag(elem, html_format))
 
-        for child in tag.children:
-            # Ignore pure-whitespace nodes between blocks; they don't carry
-            # semantic information and just clutter output.
-            if isinstance(child, NavigableString) and not child.strip():
-                continue
+        inline_buffer: list[str] = []
 
-            if isinstance(child, Tag) and not is_inline_tag(child):
-                # Child is a (non-literal) block — flush any accumulated
-                # inline content as its own line, then recurse.
-                inline_line = "".join(inline_buffer_parts).strip()
+        # Handle text before first child
+        if elem.text and elem.text.strip():
+            inline_buffer.append(html_escape(collapse_whitespace(elem.text)))
+
+        for child in elem:
+            if not is_inline_tag(child):
+                # Flush inline buffer
+                inline_line = "".join(inline_buffer).strip()
                 if inline_line:
                     lines.append(indent(depth + 1) + inline_line)
-                    inline_buffer_parts.clear()
+                    inline_buffer.clear()
                 render_block(child, depth + 1)
+                # Handle tail text after block child
+                if child.tail and child.tail.strip():
+                    inline_buffer.append(html_escape(collapse_whitespace(child.tail)))
             else:
-                # Inline or text node — keep appending to the current line.
-                inline_buffer_parts.append(render_inline(child))
+                # Inline element
+                inline_buffer.append(render_inline(child))
+                if child.tail:
+                    inline_buffer.append(html_escape(collapse_whitespace(child.tail)))
 
-        inline_line = "".join(inline_buffer_parts).strip()
+        # Flush remaining inline content
+        inline_line = "".join(inline_buffer).strip()
         if inline_line:
             lines.append(indent(depth + 1) + inline_line)
 
-        close_piece = tag._format_tag("utf-8", formatter, opening=False)  # type: ignore[attr-defined]
-        lines.append(indent(depth) + close_piece)
+        lines.append(indent(depth) + _format_close_tag(elem))
 
-    # Root traversal -------------------------------------------------------
+    # Root handling --------------------------------------------------------
 
-    # Top-level: interleave block tags and inline/text segments.
-    pending_inline: list[str] = []
-    for node in soup.contents:
-        if isinstance(node, Tag) and not is_inline_tag(node):
-            inline_line = "".join(pending_inline).strip()
-            if inline_line:
-                lines.append(inline_line)
-                pending_inline.clear()
-            render_block(node, depth=0)
-        else:
-            pending_inline.append(render_inline(node))
-
-    inline_line = "".join(pending_inline).strip()
-    if inline_line:
-        lines.append(inline_line)
+    # Handle the root element
+    render_block(tree, depth=0)
 
     return "\n".join(lines)
 
@@ -473,20 +464,6 @@ def main() -> None:
         "CSS by default; XPath if starts with / or !",
     )
     parser.add_argument(
-        "-p",
-        "--parser",
-        choices=[
-            "auto",
-            "html.parser",
-            "lxml",
-            "html5lib",
-            "xml",
-            "lxml-xml",
-        ],
-        default="auto",
-        help="Force a specific BeautifulSoup backend; default picks automatically",
-    )
-    parser.add_argument(
         "--pretty-inline",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -500,72 +477,38 @@ def main() -> None:
 
     source_text = _read_input(args.infile, args.encoding)
 
+    # Parse with lxml
+    if args.format == "xml":
+        tree = etree.fromstring(source_text.encode("utf-8"))
+    else:
+        tree = html_fromstring(source_text)
+
     # Get all removals (list of (expr, recursive) tuples)
     all_removals: list[tuple[str, bool]] = getattr(args, "all_removals", None) or []
 
-    # Check if any removals use XPath
-    has_xpath = any(
-        _parse_selector(expr)[0] == SelectorType.XPATH for expr, _ in all_removals
-    )
-
-    # Validate XPath requirements
-    if has_xpath:
-        if not LXML_AVAILABLE:
-            parser.error(
-                "XPath expressions require lxml. Install it with: pip install lxml"
-            )
-        lxml_parsers = {"lxml", "lxml-xml", "xml"}
-        if args.parser != "auto" and args.parser not in lxml_parsers:
-            parser.error(
-                f"XPath expressions require an lxml-based parser "
-                f"(lxml, lxml-xml, or xml), not '{args.parser}'."
-            )
-
-    if args.parser != "auto":
-        if not _parser_available(args.parser):
-            parser.error(
-                f"Parser '{args.parser}' is not available. Install its dependency "
-                "(e.g., 'lxml' or 'html5lib') and try again."
-            )
-        parser_name = args.parser
-    else:
-        # Force lxml if XPath is used
-        if has_xpath:
-            parser_name = "lxml-xml" if args.format == "xml" else "lxml"
-        else:
-            parser_name = _select_parser(args.format == "xml")
-
-    soup = BeautifulSoup(source_text, parser_name)
-
     # Apply removals in command-line order
-    lxml_tree = None
     for expr, recursive in all_removals:
         selector_type, selector = _parse_selector(expr)
         if selector_type == SelectorType.CSS:
-            _apply_css_removal(soup, selector, recursive)
+            _apply_css_removal(tree, selector, recursive)
         else:
-            # XPath: need to work with lxml tree
-            if lxml_tree is None:
-                # Convert soup to lxml tree
-                if args.format == "xml":
-                    lxml_tree = lxml_etree.fromstring(str(soup).encode("utf-8"))
-                else:
-                    lxml_tree = lxml_html_fromstring(str(soup))
-            _apply_xpath_removal(lxml_tree, selector, recursive)
+            _apply_xpath_removal(tree, selector, recursive)
 
-    # If we used XPath, convert lxml tree back to BeautifulSoup
-    if lxml_tree is not None:
-        if args.format == "xml":
-            modified_markup = lxml_etree.tostring(lxml_tree, encoding="unicode")
-        else:
-            modified_markup = lxml_html_tostring(lxml_tree, encoding="unicode")
-        soup = BeautifulSoup(modified_markup, parser_name)
-
-    formatter = "html" if args.format == "html" else "minimal"
+    # Pretty print
     if args.pretty_inline and args.format == "html":
-        pretty_raw = _inline_aware_prettify(soup, formatter=formatter)
+        pretty_raw = _inline_aware_prettify(
+            tree,
+            indent_str="  ",
+            html_format=True,
+        )
     else:
-        pretty_raw = soup.prettify(formatter=formatter)
+        # Use lxml's built-in pretty print
+        etree.indent(tree, space="  ")
+        if args.format == "xml":
+            pretty_raw = etree.tostring(tree, encoding="unicode")
+        else:
+            pretty_raw = html_tostring(tree, encoding="unicode")
+
     pretty = _reindent(pretty_raw, args.indent)
 
     _write_output(args.outfile, pretty, args.out_encoding)

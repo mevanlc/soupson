@@ -1,14 +1,16 @@
 [project]
 name = "soupson"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pretty-print HTML/XML from the command line"
 readme = "README.md"
 authors = [
     { name = "Mike Clark", email = "mike.clark.8192@gmail.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "beautifulsoup4>=4.14.2",
+    "beautifulsoup4>=4.14.2",  # For UnicodeDammit encoding detection
+    "lxml>=6.0.2",
+    "cssselect>=1.2.0",
 ]
 
 
@@ -16,19 +18,8 @@ dependencies = [
 soupson = "soupson:main"
 
 [project.optional-dependencies]
-lxml = [
-    "lxml>=6.0.2",
-]
-html5lib = [
-    "html5lib>=1.1",
-]
-all = [
-    "html5lib>=1.1",
-    "lxml>=6.0.2",
-]
 dev = [
     "pytest>=8.0.0",
-    "lxml>=6.0.2",
 ]
 
 [build-system]
