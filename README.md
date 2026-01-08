@@ -1,6 +1,6 @@
 # soupson
 
-A command-line utility for stewing html-like content using BeautifulSoup.
+A command-line utility for pretty-printing and sanitizing HTML/XML.
 
 ## Usage
 
@@ -13,49 +13,34 @@ soupson [options] [infile] [outfile]
 - infile: Input file (default: stdin)
 - outfile: Output file (default: stdout)
 
-| Short | Long           | Value    | Description                                                    |
-|-------|----------------|----------|----------------------------------------------------------------|
-| -i    | --indent       | N        | Number of spaces to use for indentation                        |
-| -f    | --format       | xml│html | Output tag format                                              |
-| -e    | --encoding     | name     | Interpret input using this character encoding (default: guess) |
-| -E    | --out-encoding | name     | Output using this character encoding (default: UTF-8)          |
-| -r    | --remove       | selector | Remove nodes matching the CSS selector (children are kept)     |
-| -p    | --parser       | name     | Force a specific BeautifulSoup backend (default: auto)         |
+| Flag | Args | Description |
+|------|------|-------------|
+| -i   | N | Indent width (default: 2) |
+| -f   | html\|xml | Output format (default: html) |
+| -c   | CHARSET | Input charset (default: guess) |
+| -C   | CHARSET | Output charset (default: utf-8) |
+| -rx  | XPATH | Remove by XPath (unwrap) |
+| -rrx | XPATH | Remove by XPath (recursive) |
+| -rs  | SELECTOR | Remove by CSS (unwrap) |
+| -rrs | SELECTOR | Remove by CSS (recursive) |
+| -re  | TARGET PATTERN | Remove by regex (unwrap) |
+| -rre | TARGET PATTERN | Remove by regex (recursive) |
 
-### Parsers
-
-BeautifulSoup can sit on top of several well-known backends:
-
-- `html.parser` (stdlib, always available)
-- `lxml` (fast HTML & XML)
-- `html5lib` (HTML5, most forgiving)
-- `lxml-xml` / `xml` (XML mode; requires `lxml`)
-
-Auto-selection follows BeautifulSoup’s default order: `lxml`, then `html5lib`, then `html.parser` for HTML; for XML we try `lxml-xml`, then `xml`. Use `-p/--parser` to pin a backend; the command errors if it isn’t installed.
-
+Regex targets: `e`=element name, `a`=attr name, `v`=attr value
 
 ## Tech
 
-- Python 3.14
-- argparse
-- BeautifulSoup4
-
-Optional:
+- Python 3.14+
 - lxml
+- cssselect
 
 ## Installation
 
 ```bash
-cd soupson
-uv tool install [-e] .
+uv tool install .
 ```
 
-To include optional parser dependencies when installing:
-
-- `uv tool install . --extra lxml` (fast HTML/XML)
-- `uv tool install . --extra html5lib` (HTML5, forgiving)
-- `uv tool install . --all-extras` (install both extras)
-
-## Dev notes
-
-I recommend installing soupson using `uv tool install -e`. This will put soupson on your path in a way where it can find its dependencies and your edits will be reflected immediately upon new invocations of the command.
+For development:
+```bash
+uv tool install -e .
+```

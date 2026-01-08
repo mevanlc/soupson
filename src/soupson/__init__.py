@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
-from enum import Enum
 from html import escape as html_escape
 from pathlib import Path
 from typing import Collection
@@ -13,25 +13,6 @@ from bs4 import UnicodeDammit
 from lxml import etree
 from lxml.html import fromstring as html_fromstring, tostring as html_tostring
 from lxml.cssselect import CSSSelector
-
-
-class SelectorType(Enum):
-    """Type of selector expression."""
-
-    CSS = "css"
-    XPATH = "xpath"
-
-
-def _parse_selector(expr: str) -> tuple[SelectorType, str]:
-    """Detect selector type and normalize expression.
-
-    - Starts with `/` or `!` → XPath (strip leading `!`)
-    - Otherwise → CSS selector
-    """
-    expr = expr.strip()
-    if expr.startswith(("!", "/")):
-        return SelectorType.XPATH, expr.lstrip("!")
-    return SelectorType.CSS, expr
 
 
 # A configurable set of HTML inline elements. You can override this from
@@ -119,8 +100,8 @@ def _reindent(text: str, indent_width: int) -> str:
     return "\n".join(adjusted)
 
 
-def _read_input(path: str | None, encoding: str | None) -> str:
-    """Read input from a file or stdin, decoding with a given or guessed encoding."""
+def _read_input(path: str | None, charset: str | None) -> str:
+    """Read input from a file or stdin, decoding with a given or guessed charset."""
 
     raw: bytes
     if path:
@@ -129,8 +110,8 @@ def _read_input(path: str | None, encoding: str | None) -> str:
         # stdin may already be text, but .buffer ensures bytes either way.
         raw = sys.stdin.buffer.read()
 
-    if encoding:
-        return raw.decode(encoding, errors="replace")
+    if charset:
+        return raw.decode(charset, errors="replace")
 
     dammit = UnicodeDammit(raw)
     if dammit.unicode_markup:
@@ -140,8 +121,8 @@ def _read_input(path: str | None, encoding: str | None) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _write_output(path: str | None, content: str, encoding: str) -> None:
-    data = content.encode(encoding, errors="replace")
+def _write_output(path: str | None, content: str, charset: str) -> None:
+    data = content.encode(charset, errors="replace")
     if path:
         Path(path).write_bytes(data)
     else:
@@ -185,6 +166,16 @@ def _lxml_unwrap(element) -> None:
     parent.remove(element)
 
 
+def _remove_element(elem, recursive: bool) -> None:
+    """Remove an element, either recursively or by unwrapping."""
+    if recursive:
+        parent = elem.getparent()
+        if parent is not None:
+            parent.remove(elem)
+    else:
+        _lxml_unwrap(elem)
+
+
 def _apply_css_removal(tree, selector: str, recursive: bool) -> None:
     """Apply CSS selector removal to lxml tree."""
     try:
@@ -193,12 +184,7 @@ def _apply_css_removal(tree, selector: str, recursive: bool) -> None:
         raise ValueError(f"Invalid CSS selector '{selector}': {e}") from e
 
     for elem in reversed(css(tree)):
-        if recursive:
-            parent = elem.getparent()
-            if parent is not None:
-                parent.remove(elem)
-        else:
-            _lxml_unwrap(elem)
+        _remove_element(elem, recursive)
 
 
 def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
@@ -219,12 +205,49 @@ def _apply_xpath_removal(tree, xpath: str, recursive: bool) -> None:
                 del parent.attrib[result.attrname]
         # Element result
         elif hasattr(result, "getparent") and hasattr(result, "tag"):
-            if recursive:
-                parent = result.getparent()
-                if parent is not None:
-                    parent.remove(result)
-            else:
-                _lxml_unwrap(result)
+            _remove_element(result, recursive)
+
+
+def _apply_regex_removal(tree, target: str, pattern: str, recursive: bool) -> None:
+    """Apply regex-based removal to lxml tree.
+
+    Args:
+        tree: lxml tree to modify
+        target: 'e' for element names, 'a' for attr names, 'v' for attr values
+        pattern: regex pattern to match
+        recursive: for elements, whether to remove children too
+    """
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    if target == "e":
+        # Match element names
+        for elem in reversed(list(tree.iter())):
+            if isinstance(elem.tag, str) and regex.search(elem.tag):
+                _remove_element(elem, recursive)
+    elif target == "a":
+        # Match attribute names
+        for elem in tree.iter():
+            if not isinstance(elem.tag, str):
+                continue
+            to_remove = [name for name in elem.attrib if regex.search(name)]
+            for name in to_remove:
+                del elem.attrib[name]
+    elif target == "v":
+        # Match attribute values
+        for elem in tree.iter():
+            if not isinstance(elem.tag, str):
+                continue
+            to_remove = [
+                name for name, value in elem.attrib.items()
+                if regex.search(value)
+            ]
+            for name in to_remove:
+                del elem.attrib[name]
+    else:
+        raise ValueError(f"Invalid regex target '{target}': must be 'e', 'a', or 'v'")
 
 
 def _format_open_tag(elem, html_format: bool = True) -> str:
@@ -403,14 +426,32 @@ def _inline_aware_prettify(
 
 
 class _AppendRemoval(argparse.Action):
-    """Custom action to collect -r and -R removals in order."""
+    """Custom action to collect removals in command-line order."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         if not hasattr(namespace, "all_removals") or namespace.all_removals is None:
             namespace.all_removals = []
-        # Track whether this is recursive (-R) or unwrap (-r)
-        recursive = option_string in ("-R", "--re-remove")
-        namespace.all_removals.append((values, recursive))
+
+        # Determine removal type and recursive flag from option string
+        # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex
+        if option_string.startswith("-rr"):
+            recursive = True
+            suffix = option_string[3:]  # after "-rr"
+        else:
+            recursive = False
+            suffix = option_string[2:]  # after "-r"
+
+        if suffix == "x":
+            removal = ("xpath", values, recursive)
+        elif suffix == "s":
+            removal = ("css", values, recursive)
+        elif suffix == "e":
+            # values is a list: [target, pattern]
+            removal = ("regex", (values[0], values[1]), recursive)
+        else:
+            raise ValueError(f"Unknown removal option: {option_string}")
+
+        namespace.all_removals.append(removal)
 
 
 def main() -> None:
@@ -435,34 +476,63 @@ def main() -> None:
         help="Output tag format (default: html)",
     )
     parser.add_argument(
-        "-e",
-        "--encoding",
-        dest="encoding",
-        help="Interpret input using this character encoding (default: guess)",
+        "-c",
+        "--charset",
+        dest="charset",
+        help="Interpret input using this character set (default: guess)",
     )
     parser.add_argument(
-        "-E",
-        "--out-encoding",
-        dest="out_encoding",
+        "-C",
+        "--out-charset",
+        dest="out_charset",
         default="utf-8",
-        help="Output using this character encoding (default: UTF-8)",
+        help="Output using this character set (default: UTF-8)",
+    )
+
+    # XPath removals
+    parser.add_argument(
+        "-rx",
+        action=_AppendRemoval,
+        metavar="XPATH",
+        help="Remove elements matching XPath (unwrap, keep children)",
     )
     parser.add_argument(
-        "-r",
-        "--remove",
+        "-rrx",
         action=_AppendRemoval,
-        metavar="EXPR",
-        help="Remove matching elements but keep children (unwrap). "
-        "CSS by default; XPath if starts with / or !",
+        metavar="XPATH",
+        help="Remove elements matching XPath (recursive, remove children too)",
+    )
+
+    # CSS selector removals
+    parser.add_argument(
+        "-rs",
+        action=_AppendRemoval,
+        metavar="SELECTOR",
+        help="Remove elements matching CSS selector (unwrap, keep children)",
     )
     parser.add_argument(
-        "-R",
-        "--re-remove",
+        "-rrs",
         action=_AppendRemoval,
-        metavar="EXPR",
-        help="Remove matching elements and all descendants (recursive). "
-        "CSS by default; XPath if starts with / or !",
+        metavar="SELECTOR",
+        help="Remove elements matching CSS selector (recursive, remove children too)",
     )
+
+    # Regex removals
+    parser.add_argument(
+        "-re",
+        action=_AppendRemoval,
+        nargs=2,
+        metavar=("TARGET", "PATTERN"),
+        help="Remove by regex (unwrap). TARGET: e=element name, a=attr name, v=attr value",
+    )
+    parser.add_argument(
+        "-rre",
+        action=_AppendRemoval,
+        nargs=2,
+        metavar=("TARGET", "PATTERN"),
+        help="Remove by regex (recursive). TARGET: e=element name, a=attr name, v=attr value",
+    )
+
     parser.add_argument(
         "--pretty-inline",
         action=argparse.BooleanOptionalAction,
@@ -475,7 +545,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    source_text = _read_input(args.infile, args.encoding)
+    source_text = _read_input(args.infile, args.charset)
 
     # Parse with lxml
     if args.format == "xml":
@@ -483,16 +553,18 @@ def main() -> None:
     else:
         tree = html_fromstring(source_text)
 
-    # Get all removals (list of (expr, recursive) tuples)
-    all_removals: list[tuple[str, bool]] = getattr(args, "all_removals", None) or []
+    # Get all removals (list of (type, value(s), recursive) tuples)
+    all_removals = getattr(args, "all_removals", None) or []
 
     # Apply removals in command-line order
-    for expr, recursive in all_removals:
-        selector_type, selector = _parse_selector(expr)
-        if selector_type == SelectorType.CSS:
-            _apply_css_removal(tree, selector, recursive)
-        else:
-            _apply_xpath_removal(tree, selector, recursive)
+    for removal_type, value, recursive in all_removals:
+        if removal_type == "xpath":
+            _apply_xpath_removal(tree, value, recursive)
+        elif removal_type == "css":
+            _apply_css_removal(tree, value, recursive)
+        elif removal_type == "regex":
+            target, pattern = value
+            _apply_regex_removal(tree, target, pattern, recursive)
 
     # Pretty print
     if args.pretty_inline and args.format == "html":
@@ -511,7 +583,7 @@ def main() -> None:
 
     pretty = _reindent(pretty_raw, args.indent)
 
-    _write_output(args.outfile, pretty, args.out_encoding)
+    _write_output(args.outfile, pretty, args.out_charset)
 
 
 if __name__ == "__main__":
