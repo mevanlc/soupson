@@ -707,7 +707,7 @@ def main() -> None:
         default=True,
         help=(
             "Keep inline elements and their text on a single line "
-            "(default: enabled; disable with --no-pretty-inline)"
+            "(default: enabled; disable with --no-inl)"
         ),
     )
 
@@ -760,7 +760,7 @@ def main() -> None:
             _apply_regex_substitution(tree, target, pattern, replacement)
 
     # Pretty print
-    if args.pretty_inline and args.format in ("html", "ht"):
+    if args.inl and args.format in ("html", "ht"):
         pretty_raw = _inline_aware_prettify(
             tree,
             indent_str="  ",
