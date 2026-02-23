@@ -406,6 +406,11 @@ def _inline_aware_prettify(
 
     lines: list[str] = []
 
+    def serialize_node(elem) -> str:
+        if html_format:
+            return html_tostring(elem, encoding="unicode")
+        return etree.tostring(elem, encoding="unicode")
+
     def get_tag_name(elem) -> str:
         return elem.tag.lower() if isinstance(elem.tag, str) else ""
 
@@ -438,6 +443,9 @@ def _inline_aware_prettify(
 
     def render_inline(elem) -> str:
         """Render an element and its descendants without line breaks."""
+        if not isinstance(elem.tag, str):
+            return serialize_node(elem)
+
         tag_name = get_tag_name(elem)
 
         # Literal tags keep contents as-is
@@ -472,6 +480,13 @@ def _inline_aware_prettify(
 
     def render_block(elem, depth: int) -> None:
         """Render a block element with proper indentation."""
+        if not isinstance(elem.tag, str):
+            rendered = serialize_node(elem)
+            if rendered:
+                for line in rendered.splitlines():
+                    lines.append(indent(depth) + line)
+            return
+
         tag_name = get_tag_name(elem)
 
         # Literal tags: don't reflow internal whitespace
@@ -611,10 +626,10 @@ def main() -> None:
     )
     parser.add_argument(
         "-f",
-        choices=["xml", "html", "ht"],
+        choices=["xml", "html", "ht", "htmlpart"],
         default="ht",
         dest="format",
-        help="Output format: html (full document), ht (fragment), xml (default: ht)",
+        help="Output format: html (full document), ht/htmlpart (fragment), xml (default: ht)",
     )
     parser.add_argument(
         "-c",
@@ -715,6 +730,9 @@ def main() -> None:
     _trace("parsed args:", args)
     _trace("all_removals:", getattr(args, "all_removals", None))
     _trace("all_substitutions:", getattr(args, "all_substitutions", None))
+
+    if args.format == "htmlpart":
+        args.format = "ht"
 
     source_text = _read_input(args.infile, args.charset)
 
