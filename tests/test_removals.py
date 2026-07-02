@@ -63,6 +63,46 @@ class TestCSSRemovals:
 
 
 @pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
+class TestAttributeRemovals:
+    """Tests for direct attribute removals."""
+
+    def test_remove_attribute_names(self):
+        """Test -ra removes comma-separated attribute names."""
+        import subprocess
+
+        html = '<html><body><p style="x" onclick="y()" data-style="keep">text</p></body></html>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-ra", "style,onclick"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert ' style="x"' not in result.stdout
+        assert "onclick=" not in result.stdout
+        assert 'data-style="keep"' in result.stdout
+        assert "text" in result.stdout
+
+    def test_remove_attribute_names_case_insensitive_exact(self):
+        """Test -ra matches exact attribute names case-insensitively."""
+        import subprocess
+
+        xml = '<root><item STYLE="x" Class="y" data-style="keep" style-extra="keep">text</item></root>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "xml", "-ra", "style,class"],
+            input=xml,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "STYLE=" not in result.stdout
+        assert "Class=" not in result.stdout
+        assert 'data-style="keep"' in result.stdout
+        assert 'style-extra="keep"' in result.stdout
+        assert "text" in result.stdout
+
+
+@pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
 class TestXPathRemovals:
     """Tests for XPath removals (requires lxml)."""
 

@@ -255,6 +255,20 @@ def _apply_regex_removal(tree, target: str, pattern: str, recursive: bool) -> No
         raise ValueError(f"Invalid regex target '{target}': must be 'e', 'a', or 'v'")
 
 
+def _apply_attribute_removal(tree, names: str) -> None:
+    """Remove attributes by exact, case-insensitive name."""
+    attr_names = {name.strip().casefold() for name in names.split(",") if name.strip()}
+    if not attr_names:
+        raise ValueError("No attribute names provided for -ra")
+
+    for elem in tree.iter():
+        if not isinstance(elem.tag, str):
+            continue
+        to_remove = [name for name in elem.attrib if name.casefold() in attr_names]
+        for name in to_remove:
+            del elem.attrib[name]
+
+
 def _apply_xpath_substitution(tree, xpath: str, pattern: str, replacement: str) -> None:
     """Apply substitution to attribute values matched by XPath.
 
@@ -555,7 +569,7 @@ class _AppendRemoval(argparse.Action):
             namespace.all_removals = []
 
         # Determine removal type and recursive flag from option string
-        # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex
+        # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex, -ra = attrs
         if option_string.startswith("-rr"):
             recursive = True
             suffix = option_string[3:]  # after "-rr"
@@ -567,6 +581,8 @@ class _AppendRemoval(argparse.Action):
             removal = ("xpath", values, recursive)
         elif suffix == "s":
             removal = ("css", values, recursive)
+        elif suffix == "a":
+            removal = ("attrs", values, recursive)
         elif suffix == "e":
             # values is a list: [target, pattern]
             removal = ("regex", (values[0], values[1]), recursive)
@@ -716,6 +732,14 @@ def main() -> None:
         help="Substitute by regex. TARGET: e=element name, a=attr name, v=attr value",
     )
 
+    # Attribute removals
+    parser.add_argument(
+        "-ra",
+        action=_AppendRemoval,
+        metavar="NAME[,NAME...]",
+        help="Remove attributes by exact name (case-insensitive)",
+    )
+
     parser.add_argument(
         "--inl",
         action=argparse.BooleanOptionalAction,
@@ -755,6 +779,8 @@ def main() -> None:
             _apply_xpath_removal(tree, value, recursive)
         elif removal_type == "css":
             _apply_css_removal(tree, value, recursive)
+        elif removal_type == "attrs":
+            _apply_attribute_removal(tree, value)
         elif removal_type == "regex":
             target, pattern = value
             _apply_regex_removal(tree, target, pattern, recursive)

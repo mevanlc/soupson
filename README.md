@@ -23,6 +23,7 @@ soupson [options] [infile] [outfile]
 | -rrx | XPATH | Remove by XPath (recursive) |
 | -rs  | SELECTOR | Remove by CSS (unwrap) |
 | -rrs | SELECTOR | Remove by CSS (recursive) |
+| -ra  | NAME[,NAME...] | Remove attributes by exact name (case-insensitive) |
 | -re  | TARGET PATTERN | Remove by regex (unwrap) |
 | -rre | TARGET PATTERN | Remove by regex (recursive) |
 
