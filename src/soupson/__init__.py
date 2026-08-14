@@ -269,6 +269,11 @@ def _apply_attribute_removal(tree, names: str) -> None:
             del elem.attrib[name]
 
 
+def _apply_comment_removal(tree) -> None:
+    """Remove comments while preserving their tail text."""
+    etree.strip_elements(tree, etree.Comment, with_tail=False)
+
+
 def _apply_xpath_substitution(tree, xpath: str, pattern: str, replacement: str) -> None:
     """Apply substitution to attribute values matched by XPath.
 
@@ -569,7 +574,8 @@ class _AppendRemoval(argparse.Action):
             namespace.all_removals = []
 
         # Determine removal type and recursive flag from option string
-        # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex, -ra = attrs
+        # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex,
+        # -ra = attrs, -rco = comments
         if option_string.startswith("-rr"):
             recursive = True
             suffix = option_string[3:]  # after "-rr"
@@ -583,6 +589,8 @@ class _AppendRemoval(argparse.Action):
             removal = ("css", values, recursive)
         elif suffix == "a":
             removal = ("attrs", values, recursive)
+        elif suffix == "co":
+            removal = ("comments", None, recursive)
         elif suffix == "e":
             # values is a list: [target, pattern]
             removal = ("regex", (values[0], values[1]), recursive)
@@ -739,6 +747,12 @@ def main() -> None:
         metavar="NAME[,NAME...]",
         help="Remove attributes by exact name (case-insensitive)",
     )
+    parser.add_argument(
+        "-rco",
+        action=_AppendRemoval,
+        nargs=0,
+        help="Remove comments",
+    )
 
     parser.add_argument(
         "--inl",
@@ -781,6 +795,8 @@ def main() -> None:
             _apply_css_removal(tree, value, recursive)
         elif removal_type == "attrs":
             _apply_attribute_removal(tree, value)
+        elif removal_type == "comments":
+            _apply_comment_removal(tree)
         elif removal_type == "regex":
             target, pattern = value
             _apply_regex_removal(tree, target, pattern, recursive)

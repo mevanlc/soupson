@@ -103,6 +103,46 @@ class TestAttributeRemovals:
 
 
 @pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
+class TestCommentRemovals:
+    """Tests for comment removal."""
+
+    def test_remove_html_comments_preserves_surrounding_text(self):
+        """Test -rco removes all HTML comments without dropping tail text."""
+        import subprocess
+
+        html = "<div>before<!-- first -->middle<span>x</span><!-- second -->after</div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rco"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<!--" not in result.stdout
+        assert "first" not in result.stdout
+        assert "second" not in result.stdout
+        assert "beforemiddle" in result.stdout
+        assert "after" in result.stdout
+
+    def test_remove_xml_comments(self):
+        """Test -rco removes nested XML comments."""
+        import subprocess
+
+        xml = "<root><!-- outer --><item><!-- inner -->text</item></root>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "xml", "-rco"],
+            input=xml,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<!--" not in result.stdout
+        assert "outer" not in result.stdout
+        assert "inner" not in result.stdout
+        assert "<item>text</item>" in result.stdout
+
+
+@pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
 class TestXPathRemovals:
     """Tests for XPath removals (requires lxml)."""
 

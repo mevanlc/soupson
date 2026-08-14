@@ -24,6 +24,7 @@ soupson [options] [infile] [outfile]
 | -rs  | SELECTOR | Remove by CSS (unwrap) |
 | -rrs | SELECTOR | Remove by CSS (recursive) |
 | -ra  | NAME[,NAME...] | Remove attributes by exact name (case-insensitive) |
+| -rco | | Remove comments |
 | -re  | TARGET PATTERN | Remove by regex (unwrap) |
 | -rre | TARGET PATTERN | Remove by regex (recursive) |
 
