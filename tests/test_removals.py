@@ -143,6 +143,271 @@ class TestCommentRemovals:
 
 
 @pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
+class TestBlankRemovals:
+    """Tests for blank element removal."""
+
+    def test_blank_unwrap_removes_whitespace_only_elements(self):
+        """Test -rb removes childless whitespace-only elements."""
+        import subprocess
+
+        html = "<div><p>   </p><p>keep</p></div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.count("<p>") == 1
+        assert "keep" in result.stdout
+
+    def test_blank_unwrap_keeps_whitespace_recursive_drops_it(self):
+        """Test -rb keeps the blank element's text, -rrb discards it."""
+        import subprocess
+
+        html = "<p>a<span> </span>b</p>"
+        unwrapped = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        recursive = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert unwrapped.returncode == 0
+        assert recursive.returncode == 0
+        assert "<span" not in unwrapped.stdout
+        assert "<span" not in recursive.stdout
+        assert "a b" in unwrapped.stdout
+        assert "ab" in recursive.stdout
+
+    def test_blank_removal_preserves_tail_text(self):
+        """Test tail text after a blank element survives both variants."""
+        import subprocess
+
+        html = "<div><span></span>after</div>"
+        for flag in ("-rb", "-rrb"):
+            result = subprocess.run(
+                ["uv", "run", "soupson", "-f", "htmlpart", flag],
+                input=html,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0
+            assert "<span" not in result.stdout
+            assert "after" in result.stdout
+
+    def test_blank_cascades_to_parent(self):
+        """Test a parent left blank by removing its blank child is removed too."""
+        import subprocess
+
+        html = "<div><section><span>  </span></section>after</div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<span" not in result.stdout
+        assert "<section" not in result.stdout
+        assert "<div" in result.stdout
+        assert "after" in result.stdout
+
+    def test_blank_requires_exact_emptiness_for_preserve_tags(self):
+        """Test whitespace-preserving tags are blank only when exactly empty."""
+        import subprocess
+
+        html = "<div><pre> </pre><pre></pre><textarea></textarea></div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.count("<pre>") == 1
+        assert "<textarea" not in result.stdout
+
+    def test_blank_ignores_void_elements(self):
+        """Test void elements are never blank in HTML mode."""
+        import subprocess
+
+        html = '<div><br><img src="x"><span></span></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<br" in result.stdout
+        assert "<img" in result.stdout
+        assert "<span" not in result.stdout
+
+    def test_blank_removes_empty_tags_in_xml_mode(self):
+        """Test XML mode has no void elements, so empty tags are blank."""
+        import subprocess
+
+        xml = "<root><item/><item>x</item><br/></root>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "xml", "-rrb"],
+            input=xml,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<br" not in result.stdout
+        assert result.stdout.count("<item") == 1
+        assert "x" in result.stdout
+
+    def test_blank_keeps_elements_with_children(self):
+        """Test an element holding a child is not blank, even a void child."""
+        import subprocess
+
+        html = "<div><em><br></em></div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<em" in result.stdout
+        assert "<br" in result.stdout
+
+    def test_blank_keeps_elements_with_comment_children(self):
+        """Test a comment counts as content, but -rco first exposes the blank."""
+        import subprocess
+
+        html = "<div><div><!-- ad --></div>keep</div>"
+        kept = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        stripped = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rco", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert kept.returncode == 0
+        assert stripped.returncode == 0
+        assert kept.stdout.count("<div") == 2
+        assert stripped.stdout.count("<div") == 1
+        assert "keep" in stripped.stdout
+
+    def test_blank_ignores_attributes(self):
+        """Test attributes do not save an otherwise blank element."""
+        import subprocess
+
+        html = '<div><span class="keep"></span>text</div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrb"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<span" not in result.stdout
+        assert "text" in result.stdout
+
+    def test_blank_css_restriction(self):
+        """Test -rbs only removes blank elements matching the selector."""
+        import subprocess
+
+        html = '<div><span class="x"> </span><span> </span><p> </p></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rbs", "span.x"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert 'class="x"' not in result.stdout
+        assert result.stdout.count("<span") == 1
+        assert "<p" in result.stdout
+
+    def test_blank_css_skips_non_blank_matches(self):
+        """Test -rrbs leaves selector matches that hold content."""
+        import subprocess
+
+        html = '<div><span class="x"></span><span class="x">text</span></div>'
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrbs", ".x"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.count("<span") == 1
+        assert "text" in result.stdout
+
+    def test_blank_regex_restriction(self):
+        """Test -rbe only removes blank elements whose name matches."""
+        import subprocess
+
+        html = "<div><span></span><em></em></div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rbe", "^span$"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "<span" not in result.stdout
+        assert "<em" in result.stdout
+
+    def test_blank_regex_recursive_skips_non_blank_matches(self):
+        """Test -rrbe leaves name matches that hold content."""
+        import subprocess
+
+        html = "<div><span></span><span>text</span><em></em></div>"
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rrbe", "span"],
+            input=html,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.count("<span") == 1
+        assert "text" in result.stdout
+        assert "<em" in result.stdout
+
+    def test_blank_invalid_selector(self):
+        """Test -rbs reports an invalid CSS selector."""
+        import subprocess
+
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rbs", "[[[invalid"],
+            input="<div></div>",
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "selector" in result.stderr or "Invalid" in result.stderr
+
+    def test_blank_invalid_regex(self):
+        """Test -rbe reports an invalid regex pattern."""
+        import subprocess
+
+        result = subprocess.run(
+            ["uv", "run", "soupson", "-f", "htmlpart", "-rbe", "("],
+            input="<div></div>",
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "regex" in result.stderr or "Invalid" in result.stderr
+
+
+@pytest.mark.skipif(not HAS_LXML, reason="lxml not installed")
 class TestXPathRemovals:
     """Tests for XPath removals (requires lxml)."""
 

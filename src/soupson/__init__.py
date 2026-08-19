@@ -255,6 +255,81 @@ def _apply_regex_removal(tree, target: str, pattern: str, recursive: bool) -> No
         raise ValueError(f"Invalid regex target '{target}': must be 'e', 'a', or 'v'")
 
 
+def _is_blank_element(elem, html_mode: bool = True) -> bool:
+    """Check whether an element is blank: no children and no meaningful text.
+
+    Ordinary tags are blank when their text is empty or whitespace-only;
+    whitespace-preserving tags (``<pre>``, ``<textarea>``, ...) are blank only
+    when their text is exactly empty. Void elements (``<br>``, ``<img>``, ...)
+    are never blank in HTML mode -- they are content, not empty containers.
+    Attributes are ignored, and any child node (including a comment) counts as
+    content.
+    """
+    if not isinstance(elem.tag, str):
+        return False
+    if len(elem):
+        return False
+
+    tag_name = elem.tag.lower()
+    if html_mode and _is_void_element(tag_name):
+        return False
+
+    text = elem.text or ""
+    if tag_name in PRESERVE_WHITESPACE_TAGS:
+        return text == ""
+    return text.strip() == ""
+
+
+def _remove_blank_element(elem, recursive: bool) -> None:
+    """Remove a blank element, dropping its own text when recursive.
+
+    A blank element has no children, so a recursive removal differs from an
+    unwrap only in discarding the element's own whitespace text. The tail text
+    belongs to the parent's content, so both variants keep it.
+    """
+    if recursive:
+        elem.text = None
+    _lxml_unwrap(elem)
+
+
+def _apply_blank_removal(
+    tree,
+    recursive: bool,
+    selector: str | None = None,
+    pattern: str | None = None,
+    html_mode: bool = True,
+) -> None:
+    """Remove blank elements, optionally restricted to a CSS selector or name regex.
+
+    Elements are visited bottom-up, so a parent left blank by the removal of its
+    blank children is removed in the same pass.
+    """
+    matched = None
+    if selector is not None:
+        try:
+            css = CSSSelector(selector)
+        except Exception as e:
+            raise ValueError(f"Invalid CSS selector '{selector}': {e}") from e
+        matched = set(css(tree))
+
+    regex = None
+    if pattern is not None:
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    for elem in reversed(list(tree.iter())):
+        if not isinstance(elem.tag, str) or elem.getparent() is None:
+            continue
+        if matched is not None and elem not in matched:
+            continue
+        if regex is not None and not regex.search(elem.tag):
+            continue
+        if _is_blank_element(elem, html_mode):
+            _remove_blank_element(elem, recursive)
+
+
 def _apply_attribute_removal(tree, names: str) -> None:
     """Remove attributes by exact, case-insensitive name."""
     attr_names = {name.strip().casefold() for name in names.split(",") if name.strip()}
@@ -575,6 +650,7 @@ class _AppendRemoval(argparse.Action):
 
         # Determine removal type and recursive flag from option string
         # -rx/-rrx = xpath, -rs/-rrs = css, -re/-rre = regex,
+        # -rb/-rrb = blank, -rbs/-rrbs = blank + css, -rbe/-rrbe = blank + regex,
         # -ra = attrs, -rco = comments
         if option_string.startswith("-rr"):
             recursive = True
@@ -594,6 +670,12 @@ class _AppendRemoval(argparse.Action):
         elif suffix == "e":
             # values is a list: [target, pattern]
             removal = ("regex", (values[0], values[1]), recursive)
+        elif suffix == "b":
+            removal = ("blank", None, recursive)
+        elif suffix == "bs":
+            removal = ("blank_css", values, recursive)
+        elif suffix == "be":
+            removal = ("blank_regex", values, recursive)
         else:
             raise ValueError(f"Unknown removal option: {option_string}")
 
@@ -713,6 +795,44 @@ def main() -> None:
         help="Remove by regex (recursive). TARGET: e=element name, a=attr name, v=attr value",
     )
 
+    # Blank element removals
+    parser.add_argument(
+        "-rb",
+        action=_AppendRemoval,
+        nargs=0,
+        help="Remove blank elements (unwrap, keep whitespace text)",
+    )
+    parser.add_argument(
+        "-rrb",
+        action=_AppendRemoval,
+        nargs=0,
+        help="Remove blank elements (recursive, drop whitespace text)",
+    )
+    parser.add_argument(
+        "-rbs",
+        action=_AppendRemoval,
+        metavar=" SELECTOR",
+        help="Remove blank elements matching CSS selector (unwrap)",
+    )
+    parser.add_argument(
+        "-rrbs",
+        action=_AppendRemoval,
+        metavar="SELECTOR",
+        help="Remove blank elements matching CSS selector (recursive)",
+    )
+    parser.add_argument(
+        "-rbe",
+        action=_AppendRemoval,
+        metavar=" PATTERN",
+        help="Remove blank elements whose name matches regex (unwrap)",
+    )
+    parser.add_argument(
+        "-rrbe",
+        action=_AppendRemoval,
+        metavar="PATTERN",
+        help="Remove blank elements whose name matches regex (recursive)",
+    )
+
     # XPath substitutions
     parser.add_argument(
         "-sx",
@@ -787,6 +907,9 @@ def main() -> None:
     # Get all removals (list of (type, value(s), recursive) tuples)
     all_removals = getattr(args, "all_removals", None) or []
 
+    # Void elements are an HTML concept; XML has no inherently empty tags.
+    html_mode = args.format != "xml"
+
     # Apply removals in command-line order
     for removal_type, value, recursive in all_removals:
         if removal_type == "xpath":
@@ -800,6 +923,12 @@ def main() -> None:
         elif removal_type == "regex":
             target, pattern = value
             _apply_regex_removal(tree, target, pattern, recursive)
+        elif removal_type == "blank":
+            _apply_blank_removal(tree, recursive, html_mode=html_mode)
+        elif removal_type == "blank_css":
+            _apply_blank_removal(tree, recursive, selector=value, html_mode=html_mode)
+        elif removal_type == "blank_regex":
+            _apply_blank_removal(tree, recursive, pattern=value, html_mode=html_mode)
 
     # Get all substitutions
     all_substitutions = getattr(args, "all_substitutions", None) or []
